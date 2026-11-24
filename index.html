@@ -62,6 +62,7 @@ button.link { border: 0; background: none; color: var(--accent); min-height: 0; 
 .cam-wrap { position: relative; }
 .cam-frame { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .cam-frame div { width: 75%; height: 35%; border: 2px solid rgba(255,255,255,.85); border-radius: 10px; box-shadow: 0 0 0 9999px rgba(0,0,0,.28); }
+.cam-frame div.lock { border-color: #22c55e; box-shadow: 0 0 0 9999px rgba(0,0,0,.28), 0 0 14px #22c55e; }
 .cam-msg { color: var(--danger); font-size: .9rem; margin-top: .4rem; }
 
 .product-name { font-weight: 700; }
@@ -399,12 +400,53 @@ function loginView() {
 }
 
 // ------------------------------------------------------------------ caméra
+/**
+ * Le point (cx, cy), en pixels de la vidéo, est-il dans le cadre de visée ? Le cadre fait 75 % de la largeur
+ * et 35 % de la hauteur de la zone affichée, centré ; la vidéo est affichée en « cover » (recadrée).
+ */
+function frameContains(vw, vh, cw, ch, cx, cy) {
+  if (!vw || !vh || !cw || !ch) return false;
+  const s = Math.max(cw / vw, ch / vh);
+  const x = cx * s - (vw * s - cw) / 2;
+  const y = cy * s - (vh * s - ch) / 2;
+  return Math.abs(x - cw / 2) <= cw * 0.375 && Math.abs(y - ch / 2) <= ch * 0.175;
+}
+
 function cameraScanner(onCode) {
   const video = h("video", { class: "cam", playsinline: true, muted: true, autoplay: true });
   video.muted = true;
   const msg = h("div", { class: "cam-msg" });
-  const el = h("div", {}, h("div", { class: "cam-wrap" }, video, h("div", { class: "cam-frame" }, h("div"))), msg);
+  const frame = h("div");
+  const hint = "Visez le code voulu dans le cadre et gardez-le immobile.";
+  const info = h("div", { class: "muted", style: "margin-top:.4rem" }, hint);
+  const el = h("div", {}, h("div", { class: "cam-wrap" }, video, h("div", { class: "cam-frame" }, frame)), info, msg);
   let stream, reader, stopped = false, raf;
+
+  // Un code n'est pris que s'il est DANS le cadre et s'y maintient HOLD_MS : on peut ainsi viser
+  // un code précis quand plusieurs sont visibles, au lieu de prendre le premier vu.
+  const HOLD_MS = 700;
+  let lock = { code: "", since: 0, lastSeen: 0 };
+  function consider(cands) { // cands : [{ code, cx, cy }] en pixels de la vidéo
+    const now = performance.now();
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const inside = cands
+      .filter((c) => frameContains(vw, vh, video.clientWidth, video.clientHeight, c.cx, c.cy))
+      .sort((a, b) => Math.hypot(a.cx - vw / 2, a.cy - vh / 2) - Math.hypot(b.cx - vw / 2, b.cy - vh / 2));
+    if (!inside.length) {
+      if (now - lock.lastSeen > 400 && lock.code) {
+        lock = { code: "", since: 0, lastSeen: lock.lastSeen };
+        frame.classList.remove("lock");
+        info.textContent = hint;
+      }
+      return;
+    }
+    const best = inside[0];
+    if (best.code !== lock.code) lock = { code: best.code, since: now, lastSeen: now };
+    lock.lastSeen = now;
+    frame.classList.add("lock");
+    info.textContent = `Code vu : ${best.code}. Gardez-le immobile…`;
+    if (now - lock.since >= HOLD_MS) done(best.code);
+  }
 
   const done = (code) => {
     if (stopped) return;
@@ -435,14 +477,20 @@ function cameraScanner(onCode) {
           if (stopped) return;
           try {
             const found = await detector.detect(video);
-            if (found.length) return done(found[0].rawValue);
+            consider(found.map((f) => ({ code: f.rawValue, cx: f.boundingBox.x + f.boundingBox.width / 2, cy: f.boundingBox.y + f.boundingBox.height / 2 })));
           } catch { /* image pas prête */ }
           raf = requestAnimationFrame(tick);
         };
         tick();
       } else if (window.ZXing) {
         reader = new ZXing.BrowserMultiFormatReader();
-        await reader.decodeFromVideoDevice(null, video, (result) => result && done(result.getText()));
+        await reader.decodeFromVideoDevice(null, video, (result) => {
+          if (!result) return consider([]);
+          const pts = result.getResultPoints?.() ?? [];
+          const cx = pts.length ? pts.reduce((s, p) => s + p.getX(), 0) / pts.length : video.videoWidth / 2;
+          const cy = pts.length ? pts.reduce((s, p) => s + p.getY(), 0) / pts.length : video.videoHeight / 2;
+          consider([{ code: result.getText(), cx, cy }]);
+        });
       } else {
         msg.textContent = "Lecteur de code-barres indisponible : saisissez le code.";
       }
