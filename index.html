@@ -87,6 +87,11 @@ td.num, th.num { text-align: right; white-space: nowrap; }
 .subtabs button.active { background: var(--primary); color: var(--primary-ink); }
 
 .prod-edit .grid-f { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .5rem; }
+.selrow { display: flex; align-items: center; gap: .6rem; color: var(--ink); font-size: .95rem; margin: .2rem 0 .5rem; min-height: 32px; }
+.selrow input { width: 22px; height: 22px; min-height: 0; flex: none; }
+.selbar { position: sticky; bottom: .6rem; z-index: 9; display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: .6rem .8rem; box-shadow: 0 4px 16px rgba(0,0,0,.18); }
+.selbar .selcount { font-weight: 700; margin-right: auto; }
 .saved { color: var(--ok); font-size: .8rem; }
 .err { color: var(--danger); font-size: .85rem; }
 
@@ -709,6 +714,119 @@ function stockView() {
   return root;
 }
 
+// ------------------------------------------------------------------ étiquettes (code-barres Code 128)
+const CODE128 = ("212222 222122 222221 121223 121322 131222 122213 122312 132212 221213 221312 231212 112232 122132 122231 113222 123122 123221 223211 221132 221231 213212 223112 312131 311222 321122 321221 312212 322112 322211 212123 212321 232121 111323 131123 131321 112313 132113 132311 211313 231113 231311 112133 112331 132131 113123 113321 133121 313121 211331 231131 213113 213311 213131 311123 311321 331121 312113 312311 332111 314111 221411 431111 111224 111422 121124 121421 141122 141221 112214 112412 122114 122411 142112 142211 241211 221114 413111 241112 134111 111242 121142 121241 114212 124112 124211 411212 421112 421211 212141 214121 412121 111143 111341 131141 114113 114311 411113 411311 113141 114131 311141 411131 211412 211214 211232 2331112").split(" ");
+
+/** Code 128 : retourne la suite des largeurs de barres et d'espaces (en modules), ou null si le texte n'est pas imprimable. */
+function code128Widths(text) {
+  const s = String(text ?? "");
+  if (!s || [...s].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126)) return null;
+  const values = [];
+  if (/^\d+$/.test(s) && s.length % 2 === 0) {
+    values.push(105);
+    for (let i = 0; i < s.length; i += 2) values.push(Number(s.slice(i, i + 2)));
+  } else {
+    values.push(104);
+    for (const c of s) values.push(c.charCodeAt(0) - 32);
+  }
+  let sum = values[0];
+  for (let i = 1; i < values.length; i++) sum += values[i] * i;
+  values.push(sum % 103, 106);
+  return values.flatMap((v) => [...CODE128[v]].map(Number));
+}
+
+/** Code-barres en SVG (zone de silence comprise). */
+function barcodeSvg(text) {
+  const w = code128Widths(text);
+  if (!w) return null;
+  const quiet = 10;
+  let x = quiet, path = "";
+  w.forEach((n, i) => { if (i % 2 === 0) path += `M${x} 0h${n}v1h-${n}z`; x += n; });
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${x + quiet} 1" preserveAspectRatio="none" shape-rendering="crispEdges"><path d="${path}"/></svg>`;
+}
+
+const LABEL_SIZES = {
+  s: { label: "Petite (4 par ligne)", cols: 4, bar: 11, font: 7 },
+  m: { label: "Moyenne (3 par ligne)", cols: 3, bar: 15, font: 8.5 },
+  l: { label: "Grande (2 par ligne)", cols: 2, bar: 22, font: 11 },
+};
+const escHtml = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+/** HTML d'une étiquette : désignation (si demandée), barres, numéro lisible. */
+function labelHtml(p, withName) {
+  const svg = barcodeSvg(p.barcode);
+  return `<div class="lab">${withName ? `<div class="nm">${escHtml(p.name)}</div>` : ""}` +
+    (svg ? `<div class="bc">${svg}</div><div class="num">${escHtml(p.barcode)}</div>` : `<div class="bad">Code-barres non imprimable : ${escHtml(p.barcode || "vide")}</div>`) + "</div>";
+}
+
+function labelsDocument(products, { withName, size, copies }) {
+  const z = LABEL_SIZES[size] ?? LABEL_SIZES.m;
+  const labels = products.flatMap((p) => Array.from({ length: copies }, () => labelHtml(p, withName))).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Étiquettes StockPro</title><style>
+@page { size: A4; margin: 8mm; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #000; background: #fff; }
+.grid { display: grid; grid-template-columns: repeat(${z.cols}, 1fr); gap: 2mm; }
+.lab { border: .2mm dashed #999; padding: 2mm; break-inside: avoid; text-align: center; overflow: hidden; }
+.nm { font-size: ${z.font}pt; font-weight: 700; line-height: 1.15; max-height: 2.4em; overflow: hidden; margin-bottom: 1mm; }
+.bc svg { width: 100%; height: ${z.bar}mm; display: block; fill: #000; }
+.num { font: ${z.font - 1}pt/1.2 "Courier New", monospace; margin-top: .8mm; letter-spacing: .3pt; }
+.bad { font-size: ${z.font}pt; color: #b00; }
+</style></head><body><div class="grid">${labels}</div></body></html>`;
+}
+
+function printHtml(html) {
+  const frame = h("iframe", { style: "position:fixed;right:0;bottom:0;width:0;height:0;border:0", "aria-hidden": "true" });
+  frame.addEventListener("load", () => {
+    const w = frame.contentWindow;
+    w.addEventListener("afterprint", () => frame.remove());
+    setTimeout(() => { w.focus(); w.print(); }, 150);
+    setTimeout(() => frame.remove(), 120000);
+  });
+  frame.srcdoc = html;
+  document.body.append(frame);
+}
+
+async function printLabelsDialog(products) {
+  const bad = products.filter((p) => !code128Widths(p.barcode)).length;
+  await modal((close) => {
+    const num = (k, d) => { const v = parseInt(store.get(k), 10); return Number.isFinite(v) ? v : d; };
+    let mode = store.get("stockpro_label_mode") === "code" ? "code" : "name";
+    let size = LABEL_SIZES[store.get("stockpro_label_size")] ? store.get("stockpro_label_size") : "m";
+    const copies = h("input", { type: "number", min: 1, max: 50, inputmode: "numeric", value: Math.min(Math.max(num("stockpro_label_copies", 1), 1), 50) });
+    const preview = h("div", { class: "labprev" });
+    const getCopies = () => Math.min(Math.max(parseInt(copies.value, 10) || 1, 1), 50);
+    const draw = () => {
+      const z = LABEL_SIZES[size];
+      preview.innerHTML = `<style>.labprev .lab{border:1px dashed #999;padding:6px;text-align:center;background:#fff;color:#000;width:${z.cols === 4 ? 150 : z.cols === 3 ? 200 : 280}px;margin:auto}
+.labprev .nm{font:700 12px Arial;margin-bottom:3px}.labprev .bc svg{width:100%;height:${z.bar * 2.2}px;display:block;fill:#000}
+.labprev .num{font:11px monospace;margin-top:2px}.labprev .bad{font:12px Arial;color:#b00}</style>` + labelHtml(products[0], mode === "name");
+    };
+    const radio = (group, value, text, checked, on) => h("label", { class: "selrow" }, h("input", { type: "radio", name: group, value, checked, onchange: () => { on(value); draw(); } }), text);
+    return h("div", {},
+      h("h2", { style: "margin-top:0" }, "Imprimer des étiquettes"),
+      h("p", { class: "muted" }, `${products.length} produit${products.length > 1 ? "s" : ""} sélectionné${products.length > 1 ? "s" : ""}.`),
+      h("label", {}, "Contenu de l'étiquette"),
+      radio("mode", "name", "Code-barres et désignation du produit", mode === "name", (v) => (mode = v)),
+      radio("mode", "code", "Code-barres seul", mode === "code", (v) => (mode = v)),
+      h("label", {}, "Taille"),
+      Object.entries(LABEL_SIZES).map(([k, z]) => radio("size", k, z.label, size === k, (v) => (size = v))),
+      h("label", {}, "Étiquettes par produit"), copies,
+      h("label", {}, "Aperçu"), preview,
+      bad ? h("p", { class: "err" }, `${bad} produit${bad > 1 ? "s ont" : " a"} un code-barres vide ou non imprimable : l'étiquette le signalera.`) : null,
+      h("div", { class: "spacer" }),
+      h("div", { class: "row grow" },
+        h("button", { type: "button", onclick: () => close() }, "Annuler"),
+        h("button", { class: "primary", type: "button", onclick: () => {
+            store.set("stockpro_label_mode", mode); store.set("stockpro_label_size", size); store.set("stockpro_label_copies", String(getCopies()));
+            printHtml(labelsDocument(products, { withName: mode === "name", size, copies: getCopies() }));
+            close(true);
+          } }, "Imprimer")),
+      h("p", { class: "muted" }, "La fenêtre d'impression s'ouvre ensuite : choisissez l'imprimante, papier A4, échelle 100 %."),
+      (draw(), null));
+  });
+}
+
 // ------------------------------------------------------------------ administration
 function adminView() {
   const root = h("div");
@@ -747,15 +865,47 @@ async function adminProducts() {
   const more = h("button", { class: "hidden" }, "Afficher la suite");
   const count = h("p", { class: "muted" });
   const PAGE = 25;
+  const sel = new Map();   // produits sélectionnés (id -> produit), conservés d'une recherche à l'autre
+  const cards = new Map(); // fiches affichées (id -> { p, box })
+  const bar = h("div", { class: "selbar hidden" });
 
-  async function load(append = false) {
-    if (!append) { f.offset = 0; list.replaceChildren(); }
-    const qs = new URLSearchParams({ limit: PAGE, offset: f.offset });
+  function drawBar() {
+    bar.classList.toggle("hidden", sel.size === 0);
+    bar.replaceChildren(
+      h("span", { class: "selcount" }, `${sel.size} sélectionné${sel.size > 1 ? "s" : ""}`),
+      h("button", { class: "primary", onclick: () => printLabelsDialog([...sel.values()]).catch(fail) }, "Imprimer les étiquettes"),
+      h("button", { onclick: () => { sel.clear(); cards.forEach((c) => (c.box.checked = false)); drawBar(); } }, "Tout désélectionner"));
+  }
+  function onPick(p, on) { if (on) sel.set(p.id, p); else sel.delete(p.id); drawBar(); }
+  const filterQs = (extra) => {
+    const qs = new URLSearchParams(extra);
     if (f.q) qs.set("q", f.q);
     if (f.zone) qs.set("zone", f.zone);
-    const { total, rows } = await api(A(`/products?${qs}`));
+    return qs;
+  };
+  async function selectAll() {
+    let offset = 0, total = Infinity;
+    while (offset < total) {
+      const r = await api(A(`/products?${filterQs({ limit: 500, offset })}`));
+      total = r.total;
+      r.rows.forEach((p) => { const c = cards.get(p.id); sel.set(p.id, c ? c.p : p); if (c) c.box.checked = true; });
+      if (!r.rows.length) break;
+      offset += r.rows.length;
+    }
+    drawBar();
+    toast(`${sel.size} produit${sel.size > 1 ? "s" : ""} sélectionné${sel.size > 1 ? "s" : ""}`);
+  }
+
+  async function load(append = false) {
+    if (!append) { f.offset = 0; list.replaceChildren(); cards.clear(); }
+    const { total, rows } = await api(A(`/products?${filterQs({ limit: PAGE, offset: f.offset })}`));
     count.textContent = `${total} produit${total > 1 ? "s" : ""}`;
-    rows.forEach((p) => list.append(productEditor(p)));
+    rows.forEach((p) => {
+      if (sel.has(p.id)) sel.set(p.id, p);
+      const el = productEditor(p, { checked: sel.has(p.id), onPick });
+      cards.set(p.id, { p, box: el.querySelector(".selrow input") });
+      list.append(el);
+    });
     f.offset += rows.length;
     more.classList.toggle("hidden", f.offset >= total);
   }
@@ -766,13 +916,15 @@ async function adminProducts() {
       h("div", { class: "row grow", style: "margin-top:.5rem" },
         h("select", { onchange: (e) => { f.zone = e.target.value; load().catch(fail); } },
           h("option", { value: "" }, "Toutes les zones"), h("option", { value: "none" }, "Sans zone"), state.ref.zones.map((z) => h("option", { value: z.id }, z.name))),
-        h("button", { class: "primary", onclick: newProductDialog }, "Nouveau produit"))),
-    count, list, more);
+        h("button", { class: "primary", onclick: newProductDialog }, "Nouveau produit")),
+      h("div", { class: "row grow", style: "margin-top:.5rem" },
+        h("button", { onclick: () => selectAll().catch(fail) }, "Tout sélectionner (résultats de la recherche)"))),
+    count, list, more, bar);
   await load();
   return root;
 }
 
-function productEditor(p) {
+function productEditor(p, pick) {
   const status = h("span", { class: "saved" });
   const err = h("span", { class: "err" });
   async function save(patch, revert) {
@@ -802,6 +954,7 @@ function productEditor(p) {
   const code = h("input", { value: p.barcode, style: "font-family:monospace", onchange: () => save({ barcode: code.value }, () => (code.value = p.barcode)) });
   const gen = h("button", { title: "Générer un nouveau code", onclick: () => { code.value = String(Date.now()).slice(-12) + String(Math.floor(Math.random() * 10)); code.dispatchEvent(new Event("change")); } }, "↻");
   return h("div", { class: "card prod-edit" },
+    pick ? h("label", { class: "selrow" }, h("input", { type: "checkbox", checked: pick.checked, onchange: (e) => pick.onPick(p, e.target.checked) }), "Sélectionner pour imprimer") : null,
     h("label", {}, "Nom"), name,
     h("div", { class: "grid-f" }, h("div", {}, h("label", {}, "Zone"), zone), h("div", {}, h("label", {}, "Emplacement"), emp),
       h("div", {}, h("label", {}, "Quantité"), qty), h("div", {}, h("label", {}, "PU €"), price)),
