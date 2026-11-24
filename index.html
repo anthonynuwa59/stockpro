@@ -759,7 +759,28 @@ function labelHtml(p, withName) {
     (svg ? `<div class="bc">${svg}</div><div class="num">${escHtml(p.barcode)}</div>` : `<div class="bad">Code-barres non imprimable : ${escHtml(p.barcode || "vide")}</div>`) + "</div>";
 }
 
-function labelsDocument(products, { withName, size, copies }) {
+/** Ligne de la liste A4 : désignation à gauche, code-barres et numéro à droite. */
+function listRowHtml(p) {
+  const svg = barcodeSvg(p.barcode);
+  return `<div class="row"><div class="nm">${escHtml(p.name)}</div><div class="code">` +
+    (svg ? `<div class="bc">${svg}</div><div class="num">${escHtml(p.barcode)}</div>` : `<div class="bad">Code-barres non imprimable : ${escHtml(p.barcode || "vide")}</div>`) + "</div></div>";
+}
+
+function labelsDocument(products, { withName, size, copies, layout }) {
+  if (layout === "list") {
+    const rows = products.flatMap((p) => Array.from({ length: copies }, () => listRowHtml(p))).join("");
+    return `<!doctype html><html><head><meta charset="utf-8"><title>Liste de codes-barres StockPro</title><style>
+@page { size: A4; margin: 10mm; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #000; background: #fff; }
+.row { display: grid; grid-template-columns: 1fr 70mm; gap: 6mm; align-items: center; padding: 2.5mm 0; border-bottom: .2mm solid #999; break-inside: avoid; }
+.nm { font-size: 11pt; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.code { text-align: center; }
+.bc svg { width: 100%; height: 12mm; display: block; fill: #000; }
+.num { font: 8.5pt/1.2 "Courier New", monospace; margin-top: .8mm; letter-spacing: .3pt; }
+.bad { font-size: 9pt; color: #b00; }
+</style></head><body>${rows}</body></html>`;
+  }
   const z = LABEL_SIZES[size] ?? LABEL_SIZES.m;
   const labels = products.flatMap((p) => Array.from({ length: copies }, () => labelHtml(p, withName))).join("");
   return `<!doctype html><html><head><meta charset="utf-8"><title>Étiquettes StockPro</title><style>
@@ -791,12 +812,23 @@ async function printLabelsDialog(products) {
   const bad = products.filter((p) => !code128Widths(p.barcode)).length;
   await modal((close) => {
     const num = (k, d) => { const v = parseInt(store.get(k), 10); return Number.isFinite(v) ? v : d; };
+    let layout = store.get("stockpro_label_layout") === "list" ? "list" : "grid";
     let mode = store.get("stockpro_label_mode") === "code" ? "code" : "name";
     let size = LABEL_SIZES[store.get("stockpro_label_size")] ? store.get("stockpro_label_size") : "m";
     const copies = h("input", { type: "number", min: 1, max: 50, inputmode: "numeric", value: Math.min(Math.max(num("stockpro_label_copies", 1), 1), 50) });
     const preview = h("div", { class: "labprev" });
     const getCopies = () => Math.min(Math.max(parseInt(copies.value, 10) || 1, 1), 50);
+    const gridOpts = h("div", {});
+    const copiesLabel = h("label", {});
     const draw = () => {
+      gridOpts.classList.toggle("hidden", layout === "list");
+      copiesLabel.textContent = layout === "list" ? "Lignes par produit" : "Étiquettes par produit";
+      if (layout === "list") {
+        preview.innerHTML = `<style>.labprev .row{display:grid;grid-template-columns:1fr 45%;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid #999;background:#fff;color:#000}
+.labprev .nm{font:700 13px Arial}.labprev .bc svg{width:100%;height:34px;display:block;fill:#000}.labprev .code{text-align:center}
+.labprev .num{font:11px monospace;margin-top:2px}.labprev .bad{font:12px Arial;color:#b00}</style>` + listRowHtml(products[0]);
+        return;
+      }
       const z = LABEL_SIZES[size];
       preview.innerHTML = `<style>.labprev .lab{border:1px dashed #999;padding:6px;text-align:center;background:#fff;color:#000;width:${z.cols === 4 ? 150 : z.cols === 3 ? 200 : 280}px;margin:auto}
 .labprev .nm{font:700 12px Arial;margin-bottom:3px}.labprev .bc svg{width:100%;height:${z.bar * 2.2}px;display:block;fill:#000}
@@ -806,20 +838,24 @@ async function printLabelsDialog(products) {
     return h("div", {},
       h("h2", { style: "margin-top:0" }, "Imprimer des étiquettes"),
       h("p", { class: "muted" }, `${products.length} produit${products.length > 1 ? "s" : ""} sélectionné${products.length > 1 ? "s" : ""}.`),
-      h("label", {}, "Contenu de l'étiquette"),
-      radio("mode", "name", "Code-barres et désignation du produit", mode === "name", (v) => (mode = v)),
-      radio("mode", "code", "Code-barres seul", mode === "code", (v) => (mode = v)),
-      h("label", {}, "Taille"),
-      Object.entries(LABEL_SIZES).map(([k, z]) => radio("size", k, z.label, size === k, (v) => (size = v))),
-      h("label", {}, "Étiquettes par produit"), copies,
+      h("label", {}, "Mise en page"),
+      radio("layout", "grid", "Étiquettes en grille", layout === "grid", (v) => (layout = v)),
+      radio("layout", "list", "Liste A4 : désignation à gauche, code-barres à côté", layout === "list", (v) => (layout = v)),
+      (gridOpts.append(
+        h("label", {}, "Contenu de l'étiquette"),
+        radio("mode", "name", "Code-barres et désignation du produit", mode === "name", (v) => (mode = v)),
+        radio("mode", "code", "Code-barres seul", mode === "code", (v) => (mode = v)),
+        h("label", {}, "Taille"),
+        Object.entries(LABEL_SIZES).map(([k, z]) => radio("size", k, z.label, size === k, (v) => (size = v)))), gridOpts),
+      copiesLabel, copies,
       h("label", {}, "Aperçu"), preview,
       bad ? h("p", { class: "err" }, `${bad} produit${bad > 1 ? "s ont" : " a"} un code-barres vide ou non imprimable : l'étiquette le signalera.`) : null,
       h("div", { class: "spacer" }),
       h("div", { class: "row grow" },
         h("button", { type: "button", onclick: () => close() }, "Annuler"),
         h("button", { class: "primary", type: "button", onclick: () => {
-            store.set("stockpro_label_mode", mode); store.set("stockpro_label_size", size); store.set("stockpro_label_copies", String(getCopies()));
-            printHtml(labelsDocument(products, { withName: mode === "name", size, copies: getCopies() }));
+            store.set("stockpro_label_layout", layout); store.set("stockpro_label_mode", mode); store.set("stockpro_label_size", size); store.set("stockpro_label_copies", String(getCopies()));
+            printHtml(labelsDocument(products, { withName: mode === "name", size, copies: getCopies(), layout }));
             close(true);
           } }, "Imprimer")),
       h("p", { class: "muted" }, "La fenêtre d'impression s'ouvre ensuite : choisissez l'imprimante, papier A4, échelle 100 %."),
